@@ -210,6 +210,8 @@ Run local consistency checks plus live connectivity probes:
 
 ## Pre-Exam Validation Checklist
 
+For a full step-by-step student Mac test pass, use [TESTING.md](TESTING.md).
+
 Run this checklist on representative devices before each exam batch.
 
 - Confirm the hardcoded `EXAM_START`, `EXAM_END`, `EXAM_TIMEZONE`, Jamf host,
