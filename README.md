@@ -8,6 +8,186 @@ available.
 The current script is intentionally hardcoded for easy Jamf rollout to a group
 of devices. It is not a VPN, browser extension, or per-app filter.
 
+## Quick Deployment Guide
+
+### 1. Pre-Deployment Configuration
+
+Jamf School deployments are simplest when the exam parameters are hardcoded
+directly into `lock.sh` before uploading the script. Edit the constants at the
+top of the script for each exam batch.
+
+Step 1: set the schedule and timezone:
+
+```sh
+EXAM_TIMEZONE="Europe/Nicosia"
+EXAM_START="YYYY-MM-DD HH:MM"
+EXAM_END="YYYY-MM-DD HH:MM"
+```
+
+- `EXAM_TIMEZONE`: local timezone used by root/Jamf runs before parsing dates.
+- `EXAM_START`: exact exam lock start time.
+- `EXAM_END`: exact exam unlock time.
+
+Step 2: define allowed exam destinations:
+
+```sh
+EXAM_DOMAINS=("leaders.tech")
+EXAM_IPS=("91.107.234.193" "172.67.184.208")
+```
+
+- `EXAM_DOMAINS`: short list of exact hostnames to resolve at activation time.
+- `EXAM_IPS`: explicit IPv4 addresses that must always be allowed.
+
+The script enforces IP allowlists through `pf`. Domain entries are resolved to
+IPs and merged with `EXAM_IPS`; this is not true hostname/SNI filtering.
+
+Step 3: review management connectivity:
+
+```sh
+JAMF_SCHOOL_HOST="theislandprivatescho.jamfcloud.com"
+JAMF_SCHOOL_FALLBACK_IPS=("3.79.141.249" "35.157.251.70" "63.182.10.54")
+```
+
+These values preserve a narrow Jamf/APNs management path during the lock.
+
+### 2. Jamf Policy Setup
+
+1. In Jamf School, create or edit a script payload and paste the modified
+   `lock.sh` content.
+2. Create a policy/profile action that runs the script as root.
+3. Set execution frequency to `Once per computer` for a single exam deployment.
+   For later exams, create a new policy or clear execution history so Jamf runs
+   the updated script again.
+4. Use a trigger such as recurring check-in, enrollment complete, or another
+   school-approved deployment trigger.
+5. Scope the policy only to the Macs used for the exam.
+6. Deploy before the configured `EXAM_START`; the script installs its own
+   LaunchDaemons and handles activation, reboot recovery, and scheduled unlock.
+
+### 3. Local Management And Manual Override
+
+After deployment, the script installs itself to:
+
+```sh
+/usr/local/bin/exam_lock_tool
+```
+
+Administrators can use this installed path for emergency management:
+
+| Action | Command |
+| --- | --- |
+| Unlock immediately | `/usr/local/bin/exam_lock_tool unlock` |
+| Lock for 120 minutes | `/usr/local/bin/exam_lock_tool lock 120` |
+| Show full status | `/usr/local/bin/exam_lock_tool status` |
+| Run consistency checks | `/usr/local/bin/exam_lock_tool doctor` |
+| Follow main log | `tail -f /var/log/exam_lock.log` |
+| Follow daemon log | `tail -f /var/log/exam_daemon.err` |
+
+From a student GUI session, `./lock.sh unlock`, `./lock.sh status`, and
+`./lock.sh doctor` can request admin credentials through the macOS administrator
+prompt. The student does not need sudo rights, but a valid admin username and
+password are still required for privileged actions.
+
+## Technical Architecture
+
+This tool is a time-bounded, reboot-resilient network orchestration script for
+macOS. It uses the kernel-level `pf` packet filter to apply a fail-closed
+network posture during exams: block general traffic, then pass only DHCP, DNS,
+limited local gateway ICMP, configured exam destinations, APNs, and the Jamf
+tenant path.
+
+### 1. Self-Installation And Persistence
+
+On root/Jamf `lock`, the script copies itself to:
+
+```sh
+/usr/local/bin/exam_lock_tool
+```
+
+All LaunchDaemons call this installed copy, not the original Jamf payload. This
+keeps scheduled activation, reboot recovery, watchdog checks, and unlock working
+even if Jamf removes the original temporary script file after execution.
+
+### 2. Schedule Integrity
+
+Root/Jamf runs set `EXAM_TIMEZONE` before parsing hardcoded dates. The requested
+start/end values are converted to Unix timestamps and stored in:
+
+```sh
+/var/db/exam_netlock_state
+```
+
+The active lifecycle uses these timestamps instead of regional date strings. If
+the configured end time is already in the past, the script clamps the lock to an
+immediate bounded fail-safe window (`DEFAULT_MINUTES`, capped by
+`MAX_LOCK_HOURS`) rather than creating an indefinite or inconsistent lock.
+
+### 3. Watchdog And Failsafe Daemons
+
+The script installs two system LaunchDaemons:
+
+| Daemon | Purpose |
+| --- | --- |
+| `com.school.examnetlock.watchdog` | Runs at load and every 30 seconds. It decides whether to wait, activate, verify, repair, or unlock. It also reapplies rules after reboot if the exam is still active. |
+| `com.school.examnetlock.failsafe` | Runs at the scheduled end time and every 5 minutes. It only checks whether the lock has expired and unlocks if needed. |
+
+This replaces the older split activate/revert/restore model. The watchdog is
+idempotent: every run compares desired state with actual system state and fixes
+drift. The failsafe is a second unlock path in case the watchdog misses an end
+event.
+
+All root-mutating paths share a lock directory at `/var/run/exam_netlock.lock`
+so `lock`, `unlock`, `watchdog`, and `failsafe` do not modify `pf`, state, or
+LaunchDaemons concurrently.
+
+### 4. Packet Filter Enforcement
+
+Activation generates `/etc/exam_pf.conf` atomically, validates it with
+`pfctl -n -f`, enables `pf`, loads the rules, flushes existing connection
+states, and verifies that the expected exam rule marker is present.
+
+The generated policy:
+
+- blocks all IPv6;
+- blocks IPv4 by default;
+- allows loopback;
+- allows DHCP;
+- allows DNS to TCP/UDP port 53;
+- allows ICMP to private gateway ranges;
+- resolves `EXAM_DOMAINS` with `dig` and merges the results with `EXAM_IPS`;
+- allows TCP 80, TCP 443, and ICMP to exam IPs;
+- allows APNs to Apple `17.0.0.0/8` on TCP 443, 5223, and 2197;
+- allows HTTPS to the configured Jamf tenant IPs or fallback IPs.
+
+Flushing `pf` states on activation matters: it prevents already-open browser,
+WebSocket, SSH, or tunnel sessions from surviving the transition into exam mode.
+
+### 5. Clean Exit Guarantee
+
+Unlock is ordered to restore connectivity first:
+
+1. reload `/etc/pf.conf`;
+2. flush `pf` states;
+3. disable `pf` only when appropriate or when exam rules remain after restore;
+4. remove exam state and custom `pf` config;
+5. remove and boot out the LaunchDaemons.
+
+This order avoids leaving the machine locked because the current LaunchDaemon
+terminated itself before network cleanup completed.
+
+### 6. Audit And Visibility
+
+Operational logs are written to:
+
+```sh
+/var/log/exam_lock.log
+/var/log/exam_daemon.err
+```
+
+Operators can use `status` and `doctor` to inspect state, LaunchDaemon load
+state, `pf` status, and whether the active `pf` rules contain the exam marker.
+`doctor --connectivity` adds live URL checks for quick manual validation.
+
 ## Requirements
 
 - Target devices: supervised Apple Silicon macOS devices from the school fleet
