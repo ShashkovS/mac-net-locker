@@ -1061,8 +1061,12 @@ action="${1:-lock}"
 shift || true
 
 # Set timezone before parsing times when already root. Jamf runs as root.
+# systemsetup is best-effort (older macOS accepts "Europe/Nicosia", newer wants "Asia/Nicosia").
+# export TZ is what actually governs date parsing in this process.
 if is_root && [[ -n "$EXAM_TIMEZONE" ]]; then
-  systemsetup -settimezone "$EXAM_TIMEZONE" 2>/dev/null || true
+  systemsetup -settimezone "$EXAM_TIMEZONE" 2>/dev/null \
+    || systemsetup -settimezone "Europe/Nicosia" 2>/dev/null \
+    || true
   export TZ="$EXAM_TIMEZONE"
 fi
 
