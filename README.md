@@ -19,12 +19,14 @@ top of the script for each exam batch.
 Step 1: set the schedule and timezone:
 
 ```sh
-EXAM_TIMEZONE="Europe/Nicosia"
-EXAM_START="YYYY-MM-DD HH:MM"
-EXAM_END="YYYY-MM-DD HH:MM"
+# EXAM_TIMEZONE="Europe/Nicosia"
+EXAM_TIMEZONE=""
+EXAM_START="2026-05-15 08:30"
+EXAM_END="2026-05-15 13:10"
 ```
 
-- `EXAM_TIMEZONE`: local timezone used by root/Jamf runs before parsing dates.
+- `EXAM_TIMEZONE`: optional local timezone used by root/Jamf runs before
+  parsing dates. Leave it empty to use the Mac's current timezone.
 - `EXAM_START`: exact exam lock start time.
 - `EXAM_END`: exact exam unlock time.
 
@@ -110,17 +112,21 @@ even if Jamf removes the original temporary script file after execution.
 
 ### 2. Schedule Integrity
 
-Root/Jamf runs set `EXAM_TIMEZONE` before parsing hardcoded dates. The requested
-start/end values are converted to Unix timestamps and stored in:
+Root/Jamf runs set `EXAM_TIMEZONE` before parsing hardcoded dates only when the
+value is non-empty. With the default empty value, the script leaves the Mac's
+current timezone unchanged. The requested start/end values are converted to Unix
+timestamps and stored in:
 
 ```sh
 /var/db/exam_netlock_state
 ```
 
 The active lifecycle uses these timestamps instead of regional date strings. If
-the configured end time is already in the past, the script clamps the lock to an
-immediate bounded fail-safe window (`DEFAULT_MINUTES`, capped by
-`MAX_LOCK_HOURS`) rather than creating an indefinite or inconsistent lock.
+the requested end time is already in the past, the script refuses before
+installing LaunchDaemons, writing state, or touching `pf`. If the start time is
+in the past but the end time is still future, the lock starts immediately and
+expires at the requested end time. Any effective lock window longer than
+`MAX_LOCK_HOURS` is capped.
 
 ### 3. Watchdog And Failsafe Daemons
 
@@ -218,24 +224,23 @@ The current configuration is defined near the top of `lock.sh`.
 | --- | --- |
 | Exact exam domains | `leaders.tech` |
 | Exam IP allowlist | `91.107.234.193`, `172.67.184.208` |
-| Default legacy duration | `240` minutes |
 | Maximum lock duration | `8` hours |
 | Jamf School host | `theislandprivatescho.jamfcloud.com` |
 | Jamf fallback IPs | `3.79.141.249`, `35.157.251.70`, `63.182.10.54` |
 | APNs allowlist | Apple `17.0.0.0/8` on TCP `443`, `5223`, `2197` |
-| Exam start | `2026-03-05 08:45` |
-| Exam end | `2026-03-05 13:00` |
-| Timezone | `Europe/Nicosia` |
+| Exam start | `2026-05-15 08:30` |
+| Exam end | `2026-05-15 13:10` |
+| Timezone | empty by default; optional example `Europe/Nicosia` |
 | Installed tool path | `/usr/local/bin/exam_lock_tool` |
 | State file | `/var/db/exam_netlock_state` |
 | Main log | `/var/log/exam_lock.log` |
 | LaunchDaemon log | `/var/log/exam_daemon.err` |
 | pf rules file | `/etc/exam_pf.conf` |
 
-The hardcoded exam dates above are historical and must be changed before a real
-deployment. If the configured end time is already in the past, the script locks
-immediately for `DEFAULT_MINUTES`, capped by `MAX_LOCK_HOURS`, so a stale
-deployment still has an automatic unlock.
+The hardcoded exam dates above are a deployment template and must be changed
+before each real exam. If the configured end time is already in the past, the
+script refuses the lock and leaves the current firewall state alone. This avoids
+an old Jamf policy unexpectedly relocking devices after an exam has ended.
 
 ## How It Works
 
@@ -487,5 +492,5 @@ context. It intentionally removes the scheduled lock state.
   service matrix.
 - The script currently relies on hardcoded Jamf fallback IPs that must be
   refreshed by the script maintainer before each real deployment batch.
-- The current hardcoded schedule is in the past and will be clamped to the
-  default fail-safe duration unless edited before use.
+- A hardcoded schedule whose end time is already in the past is rejected without
+  changing `pf` or LaunchDaemons.

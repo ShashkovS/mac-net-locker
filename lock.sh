@@ -11,7 +11,6 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
 # ==============================================================================
 EXAM_DOMAINS=("leaders.tech")
 EXAM_IPS=("91.107.234.193" "172.67.184.208")
-DEFAULT_MINUTES=240
 MAX_LOCK_HOURS=8
 
 # Jamf School hostname (resolved at runtime for current IPs)
@@ -21,11 +20,13 @@ JAMF_SCHOOL_FALLBACK_IPS=("3.79.141.249" "35.157.251.70" "63.182.10.54")
 
 # Hardcoded exam schedule (for Jamf School deployment where args aren't supported)
 # Format: "YYYY-MM-DD HH:MM"
-EXAM_START="2026-03-05 08:45"
-EXAM_END="2026-03-05 13:00"
+EXAM_START="2026-05-15 08:30"
+EXAM_END="2026-05-15 13:10"
 
-# Timezone to enforce on root/Jamf runs (ensures consistent time interpretation)
-EXAM_TIMEZONE="Europe/Nicosia"
+# Optional timezone to enforce on root/Jamf runs before parsing hardcoded dates.
+# Leave empty to use the Mac's current timezone.
+# EXAM_TIMEZONE="Europe/Nicosia"
+EXAM_TIMEZONE=""
 
 # ==============================================================================
 # SYSTEM PATHS
@@ -393,17 +394,14 @@ install_daemons() {
 }
 
 normalize_schedule() {
-  local requested_start="$1" requested_end="$2" now max_seconds default_seconds
+  local requested_start="$1" requested_end="$2" now max_seconds
   local start_ts end_ts reason
 
   now="$(date +%s)"
   max_seconds=$((MAX_LOCK_HOURS * 3600))
-  default_seconds=$((DEFAULT_MINUTES * 60))
 
-  if [[ "$requested_end" -le "$now" ]] || [[ "$requested_end" -le "$requested_start" ]]; then
-    start_ts="$now"
-    end_ts=$((now + default_seconds))
-    reason="clamped_to_default"
+  if [[ "$requested_end" -le "$requested_start" ]] || [[ "$requested_end" -le "$now" ]]; then
+    return 1
   elif [[ "$requested_start" -le "$now" ]]; then
     start_ts="$now"
     end_ts="$requested_end"
@@ -420,6 +418,25 @@ normalize_schedule() {
   fi
 
   echo "$start_ts $end_ts $reason"
+}
+
+validate_requested_schedule() {
+  local requested_start="$1" requested_end="$2" now
+
+  now="$(date +%s)"
+
+  if [[ "$requested_end" -le "$requested_start" ]]; then
+    echo "❌ Exam end must be after exam start." >&2
+    return 1
+  fi
+
+  if [[ "$requested_end" -le "$now" ]]; then
+    echo "❌ Exam schedule has already ended; refusing to apply a stale lock." >&2
+    echo "   Update EXAM_START/EXAM_END, pass --from/--until, or use 'lock MINUTES' for an immediate bounded lock." >&2
+    return 1
+  fi
+
+  return 0
 }
 
 resolve_hosts_ipv4() {
@@ -594,11 +611,23 @@ root_lock_impl() {
   local requested_start="$1" requested_end="$2" normalized start_ts end_ts reason pf_before now
   local start_str end_str
 
-  normalized="$(normalize_schedule "$requested_start" "$requested_end")"
+  if ! validate_requested_schedule "$requested_start" "$requested_end"; then
+    log "ERROR: Refusing invalid or stale schedule: start=$(ts_to_string "$requested_start"), end=$(ts_to_string "$requested_end")"
+    return 1
+  fi
+
+  normalized="$(normalize_schedule "$requested_start" "$requested_end")" || {
+    log "ERROR: Failed to normalize requested schedule"
+    return 1
+  }
   read -r start_ts end_ts reason <<< "$normalized"
   now="$(date +%s)"
 
-  log "Timezone: $EXAM_TIMEZONE"
+  if [[ -n "$EXAM_TIMEZONE" ]]; then
+    log "Timezone: $EXAM_TIMEZONE"
+  else
+    log "Timezone: unchanged (system current)"
+  fi
   log "Requested schedule: start=$(ts_to_string "$requested_start"), end=$(ts_to_string "$requested_end")"
   log "Effective schedule: start=$(ts_to_string "$start_ts"), end=$(ts_to_string "$end_ts"), reason=$reason"
 
@@ -630,9 +659,7 @@ root_lock_impl() {
     echo "   Unlock at: $end_str"
   fi
 
-  if [[ "$reason" == clamped* ]]; then
-    echo "⚠️ Schedule was stale/invalid; using fail-safe duration of ${DEFAULT_MINUTES} minutes."
-  elif [[ "$reason" == *_capped ]]; then
+  if [[ "$reason" == *_capped ]]; then
     echo "⚠️ Schedule exceeded ${MAX_LOCK_HOURS}h and was capped."
   fi
 }
@@ -958,6 +985,10 @@ parse_lock_args() {
       *)
         if [[ "$1" =~ ^[0-9]+$ ]]; then
           local minutes="$1" now
+          if [[ "$minutes" -le 0 ]]; then
+            echo "❌ Lock duration must be a positive number of minutes" >&2
+            return 1
+          fi
           now="$(date +%s)"
           echo "$now $((now + minutes * 60))"
           return 0
@@ -1039,6 +1070,7 @@ case "$action" in
   lock)
     timestamps="$(parse_lock_args "$@")" || exit 1
     read -r start_ts end_ts <<< "$timestamps"
+    validate_requested_schedule "$start_ts" "$end_ts" || exit 1
     if is_root; then
       root_lock "$start_ts" "$end_ts"
     else

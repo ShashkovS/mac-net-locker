@@ -5,10 +5,10 @@ MacBook. Run these tests on a non-critical test device first. The test flow is
 designed for a student macOS account with no sudo rights, plus an available
 local administrator username and password for the macOS credential prompts.
 
-Do not start with `./lock.sh lock` without arguments during testing. The current
-hardcoded exam window in `lock.sh` is historical and in the past, so it will be
-clamped to the default fail-safe duration (`DEFAULT_MINUTES`, currently 240
-minutes). Use short explicit minute-based tests first.
+Start with short explicit minute-based tests before using `./lock.sh lock`
+without arguments. A no-argument lock uses the hardcoded `EXAM_START` and
+`EXAM_END` values in `lock.sh`; if that window has already ended, the command
+must refuse without changing the firewall.
 
 ## Test Goals
 
@@ -24,8 +24,7 @@ Confirm that:
 - reboot during an active lock preserves or reapplies the lock;
 - auto-unlock restores normal internet access;
 - manual unlock works from the student account with admin credentials;
-- stale schedules clamp to a bounded fail-safe window instead of creating a
-  stuck lock.
+- stale schedules are rejected without changing `pf` or LaunchDaemons.
 
 ## Known Allowed URLs To Verify
 
@@ -500,24 +499,29 @@ Run this only on normal DHCP Wi-Fi networks without captive portals.
    ./lock.sh unlock
    ```
 
-## Stale Schedule Clamp Test
+## Stale Schedule Refusal Test
 
-This verifies that an operator mistake cannot create an indefinite lock.
+This verifies that an old Jamf policy or operator mistake cannot relock a Mac
+after an exam has already ended.
 
-1. Run a lock with a past window:
+1. Make sure no lock is active:
+
+   ```sh
+   ./lock.sh unlock
+   ```
+
+2. Run a lock with a past window:
 
    ```sh
    ./lock.sh lock --from "2026-03-05 08:45" --until "2026-03-05 13:00"
    ```
 
-2. Enter admin credentials.
+3. Expected:
 
-3. Expected output:
-
-   - lock starts immediately;
-   - output warns that the schedule was stale/invalid;
-   - unlock time is approximately `DEFAULT_MINUTES` in the future, capped by
-     `MAX_LOCK_HOURS`.
+   - no admin credential prompt appears;
+   - the command exits nonzero;
+   - output says the exam schedule has already ended;
+   - no new lock state, LaunchDaemons, or `pf` rules are installed.
 
 4. Run:
 
@@ -527,16 +531,11 @@ This verifies that an operator mistake cannot create an indefinite lock.
 
 5. Expected:
 
-   - `Reason: clamped_to_default` or `clamped_to_default_capped`;
-   - `Effective end` is bounded and not indefinite.
+   - no active state file;
+   - no active exam `pf` marker;
+   - normal internet remains available.
 
-6. Do not wait for the full default duration during this test. Unlock manually:
-
-   ```sh
-   ./lock.sh unlock
-   ```
-
-7. Confirm cleanup:
+6. Confirm cleanup:
 
    ```sh
    ./lock.sh doctor
