@@ -23,10 +23,9 @@ JAMF_SCHOOL_FALLBACK_IPS=("3.79.141.249" "35.157.251.70" "63.182.10.54")
 EXAM_START="2026-05-15 08:30"
 EXAM_END="2026-05-15 13:10"
 
-# Optional timezone to enforce on root/Jamf runs before parsing hardcoded dates.
-# Leave empty to use the Mac's current timezone.
-# EXAM_TIMEZONE="Europe/Nicosia"
-EXAM_TIMEZONE=""
+# Timezone to enforce on root/Jamf runs before parsing hardcoded dates.
+# macOS systemsetup rejects "Europe/Nicosia"; the valid identifier is "Asia/Nicosia".
+EXAM_TIMEZONE="Asia/Nicosia"
 
 # ==============================================================================
 # SYSTEM PATHS
@@ -1064,6 +1063,7 @@ shift || true
 # Set timezone before parsing times when already root. Jamf runs as root.
 if is_root && [[ -n "$EXAM_TIMEZONE" ]]; then
   systemsetup -settimezone "$EXAM_TIMEZONE" 2>/dev/null || true
+  export TZ="$EXAM_TIMEZONE"
 fi
 
 case "$action" in
